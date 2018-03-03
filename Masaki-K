@@ -1,0 +1,1112 @@
+// fmsd1_ino.cpp
+#include  <SPI.h>
+
+void writeSingleCPP( unsigned char adrs, unsigned char data )
+{
+  digitalWrite(10, LOW);  //  select slave
+  SPI.transfer(adrs);
+  SPI.transfer(data);
+  digitalWrite(10, HIGH);
+  delay(1);
+}
+extern "C" void writeSingle( unsigned char adrs, unsigned char data ){ writeSingleCPP(adrs,data);}
+extern "C" void writeBurst( unsigned char adrs, unsigned char* data, int count )
+{
+  digitalWrite(10, LOW);
+  SPI.transfer(adrs);
+  for (int i = 0; i<count; i++) {
+    SPI.transfer(*(data + i));
+  }
+  digitalWrite(10, HIGH);
+  delay(1);
+}
+extern "C" void delayMs( int ms ){  delay(ms);}
+
+void initSPI(void)
+{
+  //  init SPI
+  /*
+  * Conditions only for Arduino UNO
+  *  SPI master
+  *  RST_N- Pin9
+  *  SS   - Pin10
+  *  MOSI - Pin11
+  *  MISO - Pin12
+  *  SCK  - Pin13
+  */
+  pinMode(10, OUTPUT);
+  digitalWrite(10, HIGH);
+  SPI.setBitOrder(MSBFIRST);
+  SPI.setClockDivider(SPI_CLOCK_DIV4);  //  4MHz
+  SPI.setDataMode(SPI_MODE0);
+  SPI.begin();
+}
+void initSD1( void )
+{
+  //  1.  powerOnReset( void );
+  pinMode(9, OUTPUT);
+  digitalWrite(9, LOW);
+
+  //  2. wait 100usec
+  delay(1);
+
+  //  3.  RST_N : high
+  digitalWrite(9, HIGH);
+
+  //  4.  DRV_SEL : low
+  writeSingleCPP(29, 0);  //  5v
+
+  //  5.  AP0 : 0
+  writeSingleCPP(2, 0x0e);
+
+  //  6.  wait for Quarz stability
+  delay(1);
+
+  //  7.  CLKE : "1"
+  writeSingleCPP(0, 0x01);
+
+  //  8.  ALRST : low
+  writeSingleCPP(1, 0x00);
+
+  //  9.  SFTRST  : 0xa3
+  writeSingleCPP(26, 0xa3);
+  delay(1);
+
+  //  10. SFTRST  : 0x00
+  writeSingleCPP(26, 0x00);
+
+  //  11. wait 30msec
+  delay(30);
+
+  //  12. AP1 AP3: "0"
+  writeSingleCPP(2, 0x04);
+
+  //  13. wait 10usec
+  delayMicroseconds(10);
+
+  //  14. AP2: "0"
+  writeSingleCPP(2, 0x00);
+
+  writeSingleCPP(25, 0xcc); //  0[dB]
+  writeSingleCPP(27, 0x3f); //  set itp max
+  writeSingleCPP(20, 0x00); //  set itp on
+  writeSingleCPP(3, 0x01);  //  amp gain(6.5[dB])
+  writeSingleCPP(9, 0xf8);  //  Sequencer Volume
+}extern "C" {
+#include "fmif.h"
+}
+#include "fmsd1.h"
+
+unsigned char note;
+void setup() {
+  // put your setup code here, to run once:
+
+  note = 0x3c;
+  initSPI();
+  initSD1();
+  Fmdriver_init();
+}
+
+void loop() {
+  // put your main code here, to run repeatedly:
+
+  Fmdriver_sendMidi(0x90);
+  Fmdriver_sendMidi(note);
+  Fmdriver_sendMidi(0x7f);
+
+  delay(500);
+
+  Fmdriver_sendMidi(0x90);
+  Fmdriver_sendMidi(note);
+  Fmdriver_sendMidi(0x00);
+
+  delay(100);
+
+  note++;
+  if ( note > 0x48 ){ note = 0x3c;}
+}// fmasgn.c
+#include "fmtype.h"
+#include "fmasgn.h"
+#include "fmvoice.h"
+
+//  Variable
+static Fmvoice  _fmvc[MAX_FM_VOICE];
+static Fmvoice* _firstEmptyVc;    //  old
+static Fmvoice* _lastEmptyVc;   //  new
+static Fmvoice* _firstOccupiedVc; //  old
+static Fmvoice* _lastOccupiedVc;  //  new
+
+//  Prototype
+static void setToEmptyList( Fmvoice* prevVc, Fmvoice* rlsVc );
+
+//  setter
+void Asgn_setFirstEmptyVc( Fmvoice* vc ){ _firstEmptyVc = vc; }
+void Asgn_setLastEmptyVc( Fmvoice* vc ){ _lastEmptyVc = vc; }
+
+//  getter
+Fmvoice* Asgn_voice( int num ){ return &(_fmvc[num]); }
+Fmvoice* Asgn_firstEmptyVc( void ){ return _firstEmptyVc; }
+Fmvoice* Asgn_lastEmptyVc( void ){ return _lastEmptyVc; }
+
+void Asgn_init( void )
+{
+  int   i;
+
+  for ( i=0; i<MAX_FM_VOICE; i++) {
+    Fmvoice_init(&_fmvc[i]);
+  }
+
+  _firstOccupiedVc = 0;
+  _lastOccupiedVc = 0;
+
+  for ( i=0; i<MAX_FM_VOICE-1; i++ ){
+    Fmvoice_setVoiceNum(&_fmvc[i], i);
+    Fmvoice_setNextVc(&_fmvc[i], &_fmvc[i + 1]);
+  }
+
+  //  for No.MAX_FM_VOICE-1
+  Fmvoice_setVoiceNum(&_fmvc[MAX_FM_VOICE - 1], MAX_FM_VOICE - 1);
+  Fmvoice_setNextVc(&_fmvc[MAX_FM_VOICE - 1], FMNULL);
+
+  _firstEmptyVc = &_fmvc[0];
+  _lastEmptyVc = &_fmvc[MAX_FM_VOICE-1];
+}
+bool Asgn_chkEmpty( void )
+{
+  if ( _firstEmptyVc == FMNULL ){ return false; }
+  else { return true; }
+}
+Fmvoice* Asgn_getEmptyVc( void )
+{
+  if ( _firstEmptyVc != FMNULL ){
+    Fmvoice* ret = _firstEmptyVc;
+    _firstEmptyVc = Fmvoice_nextVc(_firstEmptyVc);
+    if ( _lastOccupiedVc != FMNULL ){
+      Fmvoice_setNextVc(_lastOccupiedVc, ret);
+    }
+    _lastOccupiedVc = ret;
+    if ( _firstOccupiedVc == FMNULL ){
+      _firstOccupiedVc = ret;
+    }
+    return ret;
+  }
+  else {
+    FMASSERT(0);
+    return FMNULL;
+  }
+}
+void Asgn_releaseOneVc( void )
+{
+  if ( _firstOccupiedVc == FMNULL ){
+    FMASSERT(0);
+    return;
+  }
+
+  //  Search keyoffed Voice
+  Fmvoice* rlsVc = _firstOccupiedVc;
+  Fmvoice* prevVc = FMNULL;
+  while (rlsVc != FMNULL ){
+    if ( Fmvoice_isKeyon(rlsVc) == false ){
+      break;
+    }
+    prevVc = rlsVc;
+    rlsVc = Fmvoice_nextVc(rlsVc);
+  }
+
+  //  if no keyoffed vc, select first one.
+  if ( rlsVc == FMNULL ){
+    rlsVc = _firstOccupiedVc;
+  }
+
+  setToEmptyList(prevVc,rlsVc);
+}
+void Asgn_releaseParticularVc( Fmvoice* pVc )
+{
+  //  Search pVc & its prevVc
+  Fmvoice* rlsVc = _firstOccupiedVc;
+  Fmvoice* prevVc = FMNULL;
+  while ( rlsVc != FMNULL ){
+    if ( pVc == rlsVc ){
+      break;
+    }
+    prevVc = rlsVc;
+    rlsVc = Fmvoice_nextVc(rlsVc);
+  }
+  setToEmptyList(prevVc,rlsVc);
+}
+static void setToEmptyList( Fmvoice* prevVc, Fmvoice* rlsVc )
+{
+  //  Release from Occupied list
+  if ( rlsVc == _firstOccupiedVc ){
+    _firstOccupiedVc = Fmvoice_nextVc(rlsVc);
+  }
+  if ( rlsVc == _lastOccupiedVc ){
+    _lastOccupiedVc = prevVc;
+  }
+  if ( prevVc != FMNULL ){
+    Fmvoice_setNextVc(prevVc, Fmvoice_nextVc(rlsVc));
+  }
+  Fmvoice_release(rlsVc);
+
+  //  Set Empty list
+  Fmvoice_setNextVc(_lastEmptyVc, rlsVc);
+  _lastEmptyVc = rlsVc;
+  if ( _firstEmptyVc == FMNULL ){
+    _firstEmptyVc = rlsVc;
+  }
+}#ifndef FMASGN_H
+#define FMASGN_H
+#include <stdbool.h>
+#include "fmvoice.h"
+
+#define MAX_FM_VOICE 16
+
+//  public
+extern void Asgn_init( void );
+extern bool Asgn_chkEmpty( void );
+extern Fmvoice* Asgn_getEmptyVc( void );
+extern void Asgn_releaseOneVc( void );
+extern void Asgn_releaseParticularVc( Fmvoice* pvc );
+
+//  setter
+extern void Asgn_setFirstEmptyVc( Fmvoice* vc );
+extern void Asgn_setLastEmptyVc( Fmvoice* vc );
+
+//  getter
+extern Fmvoice* Asgn_voice( int num );
+extern Fmvoice* Asgn_firstEmptyVc( void );
+extern Fmvoice* Asgn_lastEmptyVc( void );
+
+#endif// fmif.c
+#include  "fmpart.h"
+
+//  Variable
+static Part       _part;
+static unsigned char  _midiCmdCounter;
+static unsigned char  _midiStatus;
+static unsigned char  _midiDataByte1;
+static unsigned char  _midiDataByte2;
+
+//  Prototype
+static void receiveDataByte( unsigned char byteStream );
+static void generateMidiCmd(void);
+
+void Fmdriver_init( void )
+{
+  _midiCmdCounter = 0;
+  _midiStatus = 0;
+  _midiDataByte1 = 0;
+  _midiDataByte2 = 0;
+
+  Part_init(&_part);
+  Part_pc(&_part,0);
+}
+void Fmdriver_sendMidi( unsigned char byteStream )
+{
+  if ( byteStream & 0x80 ){
+    if ( byteStream == 0xf7 ){
+      Tone_sendTone();
+      _midiStatus = 0;
+      _midiCmdCounter = 0;
+    }
+    else {
+      _midiStatus = byteStream;
+      _midiCmdCounter = 1;
+    }
+  }
+  else if ( _midiStatus == 0xf0 ){
+    Tone_setToneExc(byteStream,_midiCmdCounter);
+    _midiCmdCounter += 1;
+  }
+  else if ( _midiStatus != 0 ){
+    receiveDataByte(byteStream);
+  }
+}
+static void receiveDataByte( unsigned char byteStream )
+{
+  switch (_midiCmdCounter){
+    case 0: case 1:{
+      _midiDataByte1 = byteStream;
+      switch ( _midiStatus & 0xf0 ){
+        case 0xc0: case 0xd0:{
+          _midiCmdCounter = 0;
+          generateMidiCmd();
+          break;
+        }
+        default:{
+          _midiCmdCounter = 2;
+          break;
+        }
+      }
+      break;
+    }
+    case 2:{
+      _midiDataByte2 = byteStream;
+      _midiCmdCounter = 0;
+      generateMidiCmd();
+      break;
+    }
+    default: break;
+  }
+}
+static void generateMidiCmd( void )
+{
+  switch ( _midiStatus ){ //  receive only MIDI ch.1
+    case 0x80: Part_note( &_part, _midiDataByte1, 0 ); break;
+    case 0x90: Part_note( &_part, _midiDataByte1, _midiDataByte2 ); break;
+    case 0xb0: Part_cc( &_part, _midiDataByte1, _midiDataByte2 ); break;
+    case 0xc0: Part_pc( &_part, _midiDataByte1 ); break;
+    case 0xe0: Part_pbend( &_part, _midiDataByte1, _midiDataByte2 ); break;
+    default: break;
+  }
+}#ifndef FMIF_H
+#define FMIF_H
+// public
+extern void Fmdriver_init( void );
+extern void Fmdriver_sendMidi( unsigned char byteStream );
+#endif// fmnote.c
+#include  "fmtype.h"
+#include  "fmnote.h"
+#include  "fmpart.h"
+#include  "fmtone.h"
+#include  "fmasgn.h"
+
+//  Prototype
+static void   obtainNecessaryVoice(Note* _this);
+
+//  setter
+void Note_setPrevPtr( Note* _this, Note* pn ){ _this->_prevPtr = pn; }
+void Note_setNextPtr( Note* _this, Note* nn ){ _this->_nextPtr = nn; }
+void Note_setPart( Note* _this, void* pt ){ _this->_parent = pt; }
+void Note_setHold( Note* _this, bool hold ){ _this->_hold = hold; }
+//  getter
+bool Note_isInUse( Note* _this ){ return _this->_inUse; }
+bool Note_isKeyOn( Note* _this ){ return _this->_keyon; }
+bool Note_isHeld( Note* _this ){ return _this->_hold; }
+Note* Note_prevPtr( Note* _this ){ return _this->_prevPtr;}
+Note* Note_nextPtr( Note* _this ){ return _this->_nextPtr;}
+unsigned char Note_note(Note* _this){ return _this->_note; }
+unsigned char Note_velocity(Note* _this){ return _this->_velocity; }
+
+void Note_init( Note* _this )
+{
+  _this->_prevPtr = 0;
+  _this->_nextPtr = 0;
+  _this->_inUse = false;
+  _this->_keyon = false;
+  _this->_hold = false;
+  _this->_note = 0;
+  _this->_parent = 0;
+  _this->_velocity = 0;
+}
+
+bool Note_keyon( Note* _this, ToneData* newTone, unsigned char newNote, unsigned char newVelocity )
+{
+  if ( _this->_parent == FMNULL){ return false; }
+
+  _this->_note = newNote;
+  _this->_velocity = newVelocity;
+
+  //  obtain necessary voices
+  obtainNecessaryVoice( _this);
+
+  Fmvoice_keyon(_this->_vc, _this, _this->_parent, newTone, newNote, newVelocity);
+
+  //  set variables
+  _this->_keyon = true;
+  _this->_inUse = true;
+  _this->_hold = false;
+  return true;
+}
+void Note_keyoff( Note* _this )
+{
+  Fmvoice_keyoff( _this->_vc );
+  _this->_keyon = false;
+  _this->_hold = false;
+}
+void Note_damp( Note* _this )
+{
+  if (_this->_vc != FMNULL) {
+    Asgn_releaseParticularVc(_this->_vc);
+  }
+}
+void Note_releaseVc( Note* _this, Fmvoice* rlsVc )
+{
+  if ( rlsVc == _this->_vc ) {
+    _this->_vc = FMNULL;
+  }
+  Note_release(_this);
+}
+void Note_release( Note* _this )
+{
+  if (_this->_parent == FMNULL){ return; }
+  Part_releaseNote((Part*)_this->_parent,_this);
+  _this->_prevPtr = _this->_nextPtr = FMNULL;
+  _this->_keyon = false;
+  _this->_inUse = false;
+  _this->_hold = false;
+}
+void Note_chgVibDpt( Note* _this )
+{
+  if (_this->_parent == FMNULL){ return; }
+  Part* pt = (Part*)_this->_parent;
+  if (pt == FMNULL) { return; }
+  Fmvoice_chgVibDpt(_this->_vc, Part_cc1(pt));
+}
+void Note_chgPit( Note* _this )
+{
+  if (_this->_parent == FMNULL) { return; }
+  Part* pt = (Part*)_this->_parent;
+  if (pt == FMNULL) { return; }
+  Fmvoice_chgPit(_this->_vc, Part_pb(pt));
+}
+static void obtainNecessaryVoice(Note* _this)
+{
+  while (Asgn_chkEmpty() != true) {
+    Asgn_releaseOneVc();
+  } 
+  _this->_vc = Asgn_getEmptyVc();
+}#ifndef FMNOTE_H
+#define FMNOTE_H
+#include "fmtone.h"
+#include "fmvoice.h"
+
+// Note Class
+typedef struct _Note Note;
+struct _Note {
+  unsigned char _note;
+  unsigned char _velocity;
+  bool      _inUse;
+  bool      _keyon;
+  bool      _hold;
+
+  Note*     _prevPtr;
+  Note*     _nextPtr;
+  void*     _parent;
+  Fmvoice*    _vc;
+};
+
+//  public
+extern void Note_init( Note* _this );
+extern bool Note_keyon( Note* _this, ToneData* newTone, unsigned char note, unsigned char velocity );
+extern void Note_keyoff( Note* _this );
+extern void Note_releaseVc( Note* _this, Fmvoice* rlsVc );
+extern void Note_release( Note* _this );
+extern void Note_damp( Note* _this );
+extern void Note_chgVibDpt( Note* _this );
+extern void Note_chgPit( Note* _this );
+
+//  setter
+extern void Note_setPrevPtr( Note* _this, Note* pn );
+extern void Note_setNextPtr( Note* _this, Note* nn );
+extern void Note_setPart( Note* _this, void* pt );
+extern void Note_setHold( Note* _this, bool hold );
+//  getter
+extern bool Note_isInUse( Note* _this );
+extern bool Note_isKeyOn( Note* _this );
+extern bool Note_isHeld( Note* _this );
+extern Note* Note_prevPtr( Note* _this );
+extern Note* Note_nextPtr( Note* _this );
+extern unsigned char Note_note(Note* _this);
+extern unsigned char Note_velocity(Note* _this);
+#endif//  fmpart.c
+#include  "fmtype.h"
+#include  "fmpart.h"
+#include  "fmsd1.h"
+#include  "fmasgn.h"
+#include  "fmtone.h"
+
+//  Prototype
+static Note* getNote(Part* _this);
+
+//  getter
+unsigned char Part_cc1(Part* _this){ return _this->_cc1; }
+unsigned char Part_cc7(Part* _this){ return _this->_cc7; }
+unsigned short Part_pb(Part* _this){ return _this->_pbvalue; }
+unsigned char Part_toneNumber(Part* _this){ return _this->_toneNumber; }
+
+void Part_init( Part* _this )
+{
+  int i;
+
+  Asgn_init();
+  Tone_init();
+
+  _this->_topNt = 0;
+  _this->_endNt = 0;
+  _this->_cc1 = 0;
+  _this->_cc7 = 100;
+  _this->_cc64 = 0;
+  _this->_pbvalue = 0x2000;
+  _this->_toneNumber = 0;
+
+  for ( i=0; i<MAX_NOTE_OBJECT; i++ ){
+    Note_init(&_this->_note[i]);
+    Note_setPart(&_this->_note[i], (void*)_this);
+  }
+}
+void Part_note( Part* _this, unsigned char note, unsigned char velocity )
+{
+  if ( velocity != 0 ){
+    //  keyon
+    Note* newNt = getNote(_this);
+    if ( Note_keyon(newNt,&_this->_tone,note,velocity) == true ){
+      if ( _this->_endNt != FMNULL ){
+        Note_setNextPtr( _this->_endNt,newNt );
+        Note_setPrevPtr( newNt,_this->_endNt );
+      }
+      _this->_endNt = newNt;
+      if ( _this->_topNt ==FMNULL ){
+        _this->_topNt = newNt;
+      }
+    }
+  }
+  else {
+    //  keyoff
+    Note* nt = _this->_topNt;
+    while( nt != 0 ){
+      if (( Note_note(nt) == note ) &&
+        ( Note_isKeyOn(nt) == true ) &&
+        ( Note_isHeld(nt) == false )){
+        if ( _this->_cc64 < 64 ){
+          Note_keyoff(nt);
+        }
+        else {
+          Note_setHold(nt,true);
+        }
+        break;
+      }
+      nt = Note_nextPtr(nt);
+    }
+  }
+}
+void Part_releaseNote( Part* _this, Note* nt )
+{
+  Note* prevPtr = Note_prevPtr(nt);
+  if ( _this->_endNt == nt ){
+    _this->_endNt = prevPtr;
+  }
+  if ( prevPtr != FMNULL ){
+    Note_setNextPtr(prevPtr, Note_nextPtr(nt));
+  }
+
+  Note* nextPtr = Note_nextPtr(nt);
+  if ( _this->_topNt == nt ){
+    _this->_topNt = nextPtr;
+  }
+  if ( nextPtr != FMNULL ){
+    Note_setPrevPtr(nextPtr, Note_prevPtr(nt));
+  }
+}
+void Part_cc( Part* _this, unsigned char ccnum, unsigned char value )
+{
+  Note* nt = _this->_topNt;
+
+  //  Limit
+  if (value > 127) { value = 127; }
+
+  switch (ccnum) {
+    case 1: {
+      _this->_cc1 = value;
+      while ( nt != FMNULL ) {
+        Note_chgVibDpt(nt);
+        nt = Note_nextPtr(nt);
+      }
+      break;
+    }
+    case 7: {
+      _this->_cc7 = value;
+      writeSingle( REG_MASTER_VOL, (value<<1)&0xfc );
+      break;
+    }
+    case 64: {
+      _this->_cc64 = value;
+      if ( value < 64 ){
+        while ( nt != FMNULL ) {
+          if ( Note_isHeld(nt) == true ){
+            Note_keyoff(nt);
+          }
+          nt = Note_nextPtr(nt);
+        }
+      }
+      break;
+    }
+    default: break;
+  }
+}
+void Part_pc( Part* _this, unsigned char num )
+{
+  Note* nt = _this->_topNt;
+  Note* nextNt;
+
+  //  Damp
+  while ( nt != FMNULL ) {
+    nextNt = Note_nextPtr(nt);
+    Note_damp(nt);
+    nt = nextNt;
+  }
+
+  _this->_toneNumber = num;
+}
+void Part_pbend( Part* _this, unsigned char lsb, unsigned char msb )
+{
+  Note* nt = _this->_topNt;
+  _this->_pbvalue = (msb<<7)|(lsb&0x7f);
+  while ( nt != FMNULL ) {
+    Note_chgPit(nt);
+    nt = Note_nextPtr(nt);
+  }
+}
+static Note* getNote( Part* _this )
+{
+  int i;
+  Note* newNt = 0;
+  for ( i=0; i<MAX_NOTE_OBJECT; i++ ){
+    newNt = &(_this->_note[i]);
+    if ( Note_isInUse(newNt) ==  false ){
+      return newNt;
+    }
+  }
+  //  if nothing
+  newNt = _this->_topNt;
+  Note_damp(newNt);
+  return newNt;
+}#ifndef FMPART_H
+#define FMPART_H
+#include "fmnote.h"
+#include  "fmtone.h"
+#include  "fmasgn.h"
+
+#define MAX_NOTE_OBJECT 20
+
+//  Part Class
+typedef struct _Part Part;
+struct _Part{
+
+  ToneData  _tone;
+  Note    _note[MAX_NOTE_OBJECT];
+
+  Note*   _topNt; //  old
+  Note*   _endNt; //  latest
+
+  unsigned char _cc1;
+  unsigned char _cc7;
+  unsigned char _cc64;
+  unsigned short  _pbvalue; //  0 - 16383
+  unsigned char _toneNumber;
+};
+
+//  public
+extern void Part_init( Part* _this );
+extern void Part_note( Part* _this, unsigned char note, unsigned char velocity );
+extern void Part_cc( Part* _this, unsigned char ccnum, unsigned char value );
+extern void Part_pbend( Part* _this, unsigned char lsb, unsigned char msb );
+extern void Part_pc( Part* _this, unsigned char num );
+extern void Part_releaseNote( Part* _this, Note* nt);
+
+//  getter
+extern unsigned char Part_cc1( Part* _this );
+extern unsigned char Part_cc7( Part* _this );
+extern unsigned short Part_pb( Part* _this );
+extern unsigned char Part_toneNumber( Part* _this );
+#endif#ifndef FMSD1_H
+#define FMSD1_H
+
+//  public
+void initSPI( void );
+void initSD1( void );
+void delayMs( int ms );
+void writeSingle( unsigned char adrs, unsigned char data );
+void writeBurst( unsigned char adrs, unsigned char* data, int count );
+
+static const unsigned char REG_TOP_ADRS = 12;
+static const unsigned char REG_VOL = 0;
+static const unsigned char REG_BLK = 1;
+static const unsigned char REG_FNUM = 2;
+static const unsigned char REG_CTRL = 3;
+static const unsigned char REG_CH_VOL = 4;
+static const unsigned char REG_XVB = 5;
+static const unsigned char REG_INT = 6;
+static const unsigned char REG_FRC = 7;
+static const unsigned char REG_MASTER_VOL = 25;
+#endif//  fmtone.c
+#include  "fmtype.h"
+#include  "fmtone.h"
+#include  "fmsd1.h"
+
+#define   IMMUTABLE_TONE_MAX    8
+#define   MUTABLE_TONE_MAX    IMMUTABLE_TONE_MAX
+#define   AVAILABLE_TONE_NUMBER (IMMUTABLE_TONE_MAX+MUTABLE_TONE_MAX)
+#define   MAX_EXCLUSIVE_HEADER_SIZE 5
+
+#define   MAX_ELEMENT_PRM     2
+#define   OPERATOR_PRM_REG_SZ   7
+#define   MAX_TONE_PRM_SZ     (MAX_FM_OPERATOR*OPERATOR_PRM_REG_SZ + MAX_ELEMENT_PRM)
+
+typedef enum {
+  WAIT_DATA,
+  DURING_SETTING,
+  SET_STATE_MAX
+} SET_STATE;
+
+//  Variable
+static SET_STATE _toneSetState;
+static int _tprmIndex;
+static ToneData _userTone[MUTABLE_TONE_MAX];
+static const ToneData TPRM[IMMUTABLE_TONE_MAX] = {
+
+  { //  GrandPiano
+    0x0b, //  VoiceCommon
+    { //  KC | AR | DR | SR | RR | SL | TL | VB | PT | WS
+      {0x01,0x0f,0x07,0x00,0x06,0x0f,0x27,0x00,0x01,0x08},  // op1
+      {0x07,0x0e,0x03,0x02,0x03,0x02,0x28,0x00,0x05,0x00},  // op2
+      {0x00,0x0d,0x01,0x01,0x04,0x03,0x22,0x01,0x01,0x00},  // op3
+      {0x06,0x0d,0x02,0x02,0x06,0x04,0x00,0x01,0x01,0x00}   // op4
+    }
+  },
+  { // E.Piano
+    0x0d, //  VoiceCommon
+    { //  KC | AR | DR | SR | RR | SL | TL | VB | PT | WS
+      {0x54,0x0f,0x04,0x05,0x0c,0x0b,0x23,0x44,0x07,0x12},  // op1
+      {0x02,0x0f,0x02,0x01,0x08,0x0f,0x04,0x45,0x01,0x00},  // op2
+      {0x25,0x0f,0x00,0x01,0x0b,0x01,0x12,0x44,0x01,0x00},  // op3
+      {0x04,0x0f,0x02,0x01,0x07,0x0f,0x04,0x41,0x01,0x00}   // op4
+    }
+  },
+  { //  TenorSax
+    0x0d, //  VoiceCommon
+    { //  KC | AR | DR | SR | RR | SL | TL | VB | PT | WS
+      {0x36,0x07,0x03,0x00,0x00,0x00,0x05,0x44,0x01,0x01},  // op1
+      {0x00,0x07,0x02,0x00,0x09,0x00,0x0f,0x43,0x01,0x08},  // op2
+      {0x36,0x07,0x03,0x00,0x00,0x00,0x08,0x44,0x01,0x09},  // op3
+      {0x02,0x07,0x02,0x00,0x09,0x00,0x0d,0x43,0x01,0x00}   // op4
+    }
+  },
+  { //  PickBass
+    0x0b, //  VoiceCommon
+    { //  KC | AR | DR | SR | RR | SL | TL | VB | PT | WS
+      {0x56,0x0f,0x07,0x02,0x03,0x01,0x13,0x44,0x01,0x00},  // op1
+      {0x04,0x0c,0x0b,0x04,0x06,0x07,0x15,0x44,0x07,0x00},  // op2
+      {0x06,0x0f,0x09,0x02,0x06,0x02,0x17,0x44,0x02,0x00},  // op3
+      {0x04,0x0b,0x02,0x06,0x08,0x06,0x00,0x44,0x01,0x00}   // op4
+    }
+  },
+  { //  TnklBell
+    0x0d, //  VoiceCommon
+    { //  KC | AR | DR | SR | RR | SL | TL | VB | PT | WS
+      {0x31,0x0f,0x06,0x03,0x04,0x05,0x10,0x44,0x0e,0x00},  // op1
+      {0x02,0x0c,0x06,0x07,0x06,0x0e,0x0b,0x44,0x02,0x00},  // op2
+      {0x00,0x0c,0x06,0x02,0x02,0x05,0x1e,0x44,0x77,0x01},  // op3
+      {0x00,0x0f,0x05,0x04,0x05,0x0d,0x01,0x54,0x06,0x00}   // op4
+    }
+  },
+  { //  NewAgePd
+    0x0d, //  VoiceCommon
+    { //  KC | AR | DR | SR | RR | SL | TL | VB | PT | WS
+      {0x54,0x0f,0x0f,0x03,0x03,0x00,0x26,0x44,0x07,0x01},  // op1
+      {0x02,0x0f,0x07,0x04,0x04,0x00,0x0b,0x44,0x05,0x00},  // op2
+      {0x62,0x06,0x01,0x00,0x01,0x00,0x18,0x03,0x71,0x01},  // op3
+      {0x02,0x08,0x01,0x00,0x05,0x01,0x00,0x03,0x01,0x00}   // op4
+    }
+  },
+  { //  Rim Shot
+    0x0d, //  VoiceCommon
+    { //  KC | AR | DR | SR | RR | SL | TL | VB | PT | WS
+      {0x7c,0x0f,0x00,0x05,0x05,0x00,0x05,0x44,0x0c,0x02},  // op1
+      {0x0c,0x0f,0x07,0x07,0x07,0x07,0x00,0x44,0x0b,0x00},  // op2
+      {0x08,0x0f,0x0a,0x06,0x06,0x08,0x00,0x44,0x0c,0x00},  // op3
+      {0x08,0x0f,0x07,0x07,0x07,0x07,0x00,0x44,0x07,0x02}   // op4
+    }
+  },
+  { //  Castanet
+    0x0d, //  VoiceCommon
+    { //  KC | AR | DR | SR | RR | SL | TL | VB | PT | WS
+      {0x68,0x0f,0x07,0x05,0x09,0x0f,0x02,0x44,0x07,0x01},  // op1
+      {0x0c,0x0a,0x08,0x05,0x0f,0x0f,0x00,0x44,0x05,0x06},  // op2
+      {0x08,0x0f,0x05,0x06,0x05,0x00,0x27,0x44,0x02,0x05},  // op3
+      {0x08,0x0c,0x0a,0x09,0x09,0x0a,0x14,0x44,0x05,0x00}   // op4
+    }
+  }
+};
+const unsigned char tExcCheck[MAX_EXCLUSIVE_HEADER_SIZE] = {
+  0x43, //  Exclusive:1, Yamaha ID
+  0x7f, //  Exclusive:2, Make/DIY ID1
+  0x02, //  Exclusive:3, Make/DIY ID2
+  0x00, //  Exclusive:4, YMF825 ID
+  0x00  //  Exclusive:5, reserved
+};
+void Tone_init( void )
+{
+  int i;
+  for ( i=0; i<MUTABLE_TONE_MAX; i++ ){
+    _userTone[i] = TPRM[i];
+  }
+  _toneSetState = WAIT_DATA;
+  _tprmIndex = 0;
+
+  Tone_sendTone();
+}
+void Tone_setToneExc( unsigned char data, int excNum )
+{
+  if ( _toneSetState == WAIT_DATA ){
+    if (( excNum == 1 ) && ( data == tExcCheck[0] )){
+      _toneSetState = DURING_SETTING;
+    }
+  }
+  else if ( _toneSetState == DURING_SETTING ){
+    if ( excNum-1 < MAX_EXCLUSIVE_HEADER_SIZE ){
+      if ( data != tExcCheck[excNum-1] ){ _toneSetState = WAIT_DATA; }
+    }
+    else if ( excNum == 6 ){
+      if ( data < MUTABLE_TONE_MAX ){ _tprmIndex = data; }
+      else { _toneSetState = WAIT_DATA; }
+    }
+    else if ( excNum == 7 ){
+      _userTone[_tprmIndex].voiceCommon = data;
+    }
+    else if ( excNum < 48 ){
+        _userTone[_tprmIndex].opPrm[(excNum-8)/MAX_OPERATOR_PRM][(excNum-8)%MAX_OPERATOR_PRM] = data;
+      }
+    else { _toneSetState = WAIT_DATA; }
+  }
+}
+void Tone_sendTone( void )
+{
+  int i,j;
+  unsigned char regImage[MAX_TONE_PRM_SZ*AVAILABLE_TONE_NUMBER + 1 + 4]; // 485
+
+  //  top
+  regImage[0] = 0x80 + AVAILABLE_TONE_NUMBER;
+
+  for ( i=0; i<AVAILABLE_TONE_NUMBER; i++ ){
+    unsigned char* riPtr = &regImage[MAX_TONE_PRM_SZ*i + 1];
+
+    ToneData* td;
+    if ( i < IMMUTABLE_TONE_MAX ){
+      td = (ToneData*)&(TPRM[i]);
+    }
+    else {
+      td = (ToneData*)&(_userTone[i-IMMUTABLE_TONE_MAX]);
+    }
+
+    riPtr[0] = (td->voiceCommon & 0x60)>>5;
+    riPtr[1] = ((td->voiceCommon & 0x18)<<3) | (td->voiceCommon & 0x07);
+
+    for ( j=0; j<MAX_FM_OPERATOR; j++ ){
+      riPtr[MAX_ELEMENT_PRM+OPERATOR_PRM_REG_SZ*j+0] = (td->opPrm[j][3] << 4) | (td->opPrm[j][0] & 0x08) | ((td->opPrm[j][0] & 0x04)>>2);
+      riPtr[MAX_ELEMENT_PRM+OPERATOR_PRM_REG_SZ*j+1] = (td->opPrm[j][4] << 4) | td->opPrm[j][2];
+      riPtr[MAX_ELEMENT_PRM+OPERATOR_PRM_REG_SZ*j+2] = (td->opPrm[j][1] << 4) | td->opPrm[j][5];
+      riPtr[MAX_ELEMENT_PRM+OPERATOR_PRM_REG_SZ*j+3] = (td->opPrm[j][6] << 2) | (td->opPrm[j][0] & 0x03);
+      riPtr[MAX_ELEMENT_PRM+OPERATOR_PRM_REG_SZ*j+4] = td->opPrm[j][7];
+      riPtr[MAX_ELEMENT_PRM+OPERATOR_PRM_REG_SZ*j+5] = ((td->opPrm[j][8] & 0x0f) << 4) | ((td->opPrm[j][8] & 0xf0) >> 4);
+      riPtr[MAX_ELEMENT_PRM+OPERATOR_PRM_REG_SZ*j+6] = (td->opPrm[j][9] << 3) | ((td->opPrm[j][0] & 0x70) >> 4);
+    }
+  }
+
+  //  end 
+  regImage[MAX_TONE_PRM_SZ*AVAILABLE_TONE_NUMBER + 1] = 0x80;
+  regImage[MAX_TONE_PRM_SZ*AVAILABLE_TONE_NUMBER + 2] = 0x03;
+  regImage[MAX_TONE_PRM_SZ*AVAILABLE_TONE_NUMBER + 3] = 0x81;
+  regImage[MAX_TONE_PRM_SZ*AVAILABLE_TONE_NUMBER + 4] = 0x80;
+
+  //   Soft Reset
+//    writeSingle(26,0xa3);
+//    writeSingle(26,0x00);
+  writeSingle(8,0xf6);
+  delayMs(1);
+  writeSingle(8,0x00);
+
+  writeBurst( 7, regImage, MAX_TONE_PRM_SZ*AVAILABLE_TONE_NUMBER + 5 );
+}#ifndef FMTONE_H
+#define FMTONE_H
+
+#define MAX_FM_OPERATOR   4
+#define MAX_OPERATOR_PRM  10
+
+//  ToneData Class
+typedef struct {
+  unsigned char   voiceCommon;        // BO(2) | LFO(2) | ALG(3)
+  unsigned char   opPrm[MAX_FM_OPERATOR][MAX_OPERATOR_PRM];
+} ToneData;
+
+//  public
+extern void Tone_init( void );
+extern void Tone_setToneExc( unsigned char data, int excNum );
+extern void Tone_sendTone( void );
+#endif#ifndef FMTYPE_H
+#define FMTYPE_H
+
+#define  FMNULL  ((void*)0)
+
+#define FMASSERT(cd)  if(!(cd)){while(1);}
+
+#endif//  fmvoice.c
+#include  "fmtype.h"
+#include  "fmvoice.h"
+#include  "fmtone.h"
+#include  "fmnote.h"
+#include  "fmsd1.h"
+#include  "fmpart.h"
+
+//  setter
+void Fmvoice_setVoiceNum( Fmvoice* _this, unsigned char vn ){ _this->_vnum = vn; }
+void Fmvoice_setNextVc( Fmvoice* _this, Fmvoice* vc ){ _this->_nextVc = vc; }
+
+//  getter
+unsigned char Fmvoice_vnum( Fmvoice* _this ){ return _this->_vnum; }
+bool Fmvoice_isKeyon( Fmvoice* _this ){ return _this->_keyon;}
+Fmvoice* Fmvoice_nextVc( Fmvoice* _this ){ return _this->_nextVc; }
+
+void Fmvoice_init( Fmvoice* _this )
+{
+  _this->_keyon = (false);
+  _this->_nextVc = FMNULL;
+}
+void Fmvoice_keyon( Fmvoice* _this, void* nt, void* pt, void* tn, unsigned char note, unsigned char vel )
+{
+  Part* ptp = (Part*)pt;
+
+  _this->_parent = nt;
+  _this->_keyon = true;
+  _this->_nextVc = FMNULL;
+
+  //  set voice number
+  writeSingle( 11, _this->_vnum );
+
+  //  Damp
+  writeSingle( REG_TOP_ADRS+REG_CTRL, 0x30 );
+
+  //  FNUM,BLOCK
+  Fmvoice_setBasicPit( _this, note );
+
+  //  Vol
+  writeSingle( REG_TOP_ADRS+REG_VOL, vel&0xfc );
+
+  //  ChVol
+  writeSingle( REG_TOP_ADRS+REG_CH_VOL, 0x71 );
+
+  //  XVB
+  Fmvoice_chgVibDpt(_this, Part_cc1(ptp));
+
+  //  INT, FRAC
+  Fmvoice_chgPit(_this, Part_pb(ptp));
+
+  //  KeyOn, ToneNum
+  writeSingle( REG_TOP_ADRS+REG_CTRL, 0x40 + Part_toneNumber(ptp) );
+}
+void Fmvoice_keyoff( Fmvoice* _this )
+{
+  _this->_keyon = false;
+  writeSingle( 11, _this->_vnum );
+  writeSingle( REG_TOP_ADRS+REG_CTRL, 0 );
+}
+void Fmvoice_release( Fmvoice* _this )
+{
+  _this->_keyon = false;
+  if ( _this->_parent != FMNULL ){
+    Note* nt = (Note*)_this->_parent;
+    Note_releaseVc(nt,_this);
+  }
+  _this->_nextVc = FMNULL;
+
+  writeSingle( 11, _this->_vnum );
+  writeSingle( REG_TOP_ADRS+REG_CTRL, 0x30 );
+}
+void Fmvoice_chgPit( Fmvoice* _this, unsigned short pb )
+{
+  static const unsigned short tPitTbl[256] = {
+  256,257,259,260,262,263,264,266,267,269,270,272,273,275,276,278,
+  279,281,282,284,285,287,288,290,292,293,295,296,298,300,301,303,
+  304,306,308,309,311,313,314,316,318,320,321,323,325,327,328,330,
+  332,334,336,337,339,341,343,345,347,349,350,352,354,356,358,360,
+  362,364,366,368,370,372,374,376,378,380,382,384,386,388,391,393,
+  395,397,399,401,403,406,408,410,412,415,417,419,421,424,426,428,
+  431,433,435,438,440,442,445,447,450,452,454,457,459,462,464,467,
+  470,472,475,477,480,482,485,488,490,493,496,498,501,504,506,509,
+  512,515,518,520,523,526,529,532,535,538,540,543,546,549,552,555,
+  558,561,564,567,571,574,577,580,583,586,589,593,596,599,602,606,
+  609,612,616,619,622,626,629,632,636,639,643,646,650,653,657,660,
+  664,668,671,675,679,682,686,690,693,697,701,705,709,712,716,720,
+  724,728,732,736,740,744,748,752,756,760,764,769,773,777,781,785,
+  790,794,798,803,807,811,816,820,825,829,834,838,843,847,852,856,
+  861,866,870,875,880,885,890,894,899,904,909,914,919,924,929,934,
+  939,944,949,954,960,965,970,975,981,986,991,997,1002,1007,1013,1023 };
+
+  unsigned char reg[2];
+  unsigned char pit = pb/64;
+  reg[1] = (unsigned char)((tPitTbl[pit]<<1) & 0x007e);
+  reg[0] = (unsigned char)(((tPitTbl[pit]<<2) & 0x1f00)>>8);
+
+  writeSingle( 11, _this->_vnum );
+  writeSingle( REG_TOP_ADRS+REG_INT, reg[0] );
+  writeSingle( REG_TOP_ADRS+REG_FRC, reg[1] );
+}
+void Fmvoice_chgVibDpt( Fmvoice* _this, unsigned char vibDpt )
+{
+  vibDpt = vibDpt >>4;
+  if ( vibDpt == 0 ){ vibDpt = 1;}
+  writeSingle( 11, _this->_vnum );
+  writeSingle( REG_TOP_ADRS+REG_XVB, vibDpt );
+}
+void Fmvoice_setBasicPit( Fmvoice* _this, unsigned char note )
+{
+  static const unsigned short tFreq[240] = {
+  347,348,349,350,351,352,353,354,355,356,  357,358,359,360,361,362,363,365,366,367,
+  368,369,370,371,372,373,374,375,376,377,  378,380,381,382,383,384,385,386,387,388,
+  390,391,392,393,394,395,396,397,399,400,  401,402,403,404,406,407,408,409,410,412,
+  413,414,415,416,417,419,420,421,422,424,  425,426,427,428,430,431,432,433,435,436,
+  437,439,440,441,442,444,445,446,447,449,  450,451,453,454,455,457,458,459,461,462,
+  463,465,466,467,469,470,471,473,474,475,  477,478,480,481,482,484,485,487,488,489,
+  491,492,494,495,496,498,499,501,502,504,  505,507,508,510,511,513,514,515,517,518,
+  520,521,523,524,526,528,529,531,532,534,  535,537,538,540,541,543,545,546,548,549,
+  551,552,554,556,557,559,561,562,564,565,  567,569,570,572,574,575,577,579,580,582,
+  584,585,587,589,590,592,594,596,597,599,  601,602,604,606,608,609,611,613,615,617,
+  618,620,622,624,626,627,629,631,633,635,  636,638,640,642,644,646,648,649,651,653,
+  655,657,659,661,663,665,667,668,670,672,  674,676,678,680,682,684,686,688,690,692};
+
+  signed short realNote = note;
+  while ( realNote > 128 ){ realNote -= 12;}
+  while ( realNote < 0 ){ realNote += 12;}
+
+  int tblIndex = (realNote % 12) * 20;
+
+  unsigned char reg[2];
+  unsigned short fr = tFreq[tblIndex];
+  unsigned char oct = realNote/12 - 1;
+  reg[0] = (unsigned char)(((fr & 0x0380)>>4) | oct);
+  reg[1] = (unsigned char)(fr & 0x007f);
+
+  writeSingle( 11, _this->_vnum );
+  writeSingle( REG_TOP_ADRS+REG_BLK, reg[0] );
+  writeSingle( REG_TOP_ADRS+REG_FNUM, reg[1] );
+}#ifndef FMVOICE_H
+#define FMVOICE_H
+#include <stdbool.h>
+
+//  Fmvoice Class
+typedef struct _Fmvoice Fmvoice;
+struct _Fmvoice {
+  unsigned char _vnum;
+  bool      _keyon;
+  Fmvoice*    _nextVc;
+  void*     _parent;
+};
+
+//  public
+extern void Fmvoice_init( Fmvoice* _this );
+extern void Fmvoice_keyon( Fmvoice* _this, void* nt, void* pt, void* tn, unsigned char note, unsigned char vel );
+extern void Fmvoice_keyoff( Fmvoice* _this );
+extern void Fmvoice_release( Fmvoice* _this );
+extern void Fmvoice_chgVibDpt( Fmvoice* _this, unsigned char vibDpt );
+extern void Fmvoice_chgPit( Fmvoice* _this, unsigned short pb );
+extern void Fmvoice_setBasicPit( Fmvoice* _this, unsigned char note );
+
+//  setter
+extern void Fmvoice_setVoiceNum( Fmvoice* _this, unsigned char vn );
+extern void Fmvoice_setNextVc( Fmvoice* _this, Fmvoice* vc );
+
+//  getter
+extern unsigned char Fmvoice_vnum( Fmvoice* _this );
+extern bool Fmvoice_isKeyon( Fmvoice* _this );
+extern Fmvoice* Fmvoice_nextVc( Fmvoice* _this );
+#endif
